@@ -1,29 +1,34 @@
-# Weekly run: update last_week (and current_year in January).
-current_year: 2026
-last_week: 44
+# ---- What to analyse ------------------------------------------------------
+indicator: cases               # cases | deaths
+selected_year: 2026            # any year with at least 5 earlier years of data
+week: auto                     # auto = last week reported nationally, or a week number
 
-# Thresholds
-baseline_years: 5              # previous years used to build the thresholds
-alert_method: q3               # q3 | mean_2sd | csum
-epidemic_method: mean_2sd      # q3 | mean_2sd | csum
-consecutive_weeks: 2           # weeks above the epidemic threshold before "Epidemic"
-exclude_years: []              # years to drop from the baseline for every district
-auto_exclude:                  # drop a district's past epidemic years automatically
-  enabled: true
-  factor: 1.5                  # annual cases > factor x median of the other baseline years
+# ---- Thresholds -------------------------------------------------------------
+# Measures: q1 (a), q3 (b), median (c), csum (d), p85 (e), mean_2sd (f)
+# Allowed pairs (the epidemic threshold must be the higher one):
+#   alert q1 or csum -> epidemic median, q3, p85 or mean_2sd
+#   alert median     -> epidemic q3, p85 or mean_2sd
+#   alert q3         -> epidemic p85 or mean_2sd
+alert_threshold: median
+epidemic_threshold: q3
+baseline_years: 5              # same week of the 5 previous years
+abnormal_years: [2022]         # skipped and replaced by earlier years
+critical_pct: 30               # % of districts above alert that is critical nationally
 
-# Sample data (fictional country). Set to false and fill `inputs` for your own workbook.
-use_sample_data: true
+# ---- Data -------------------------------------------------------------------
+use_sample_data: true          # fictional country; set false to use `inputs`
 seed: 7
+sample_last_week: 44
 
 country_name: "My country"
 inputs:
   workbook: data/malaria_weekly.xlsx
   geometry: data/districts.geojson
-sheets:
-  cases: Cases                 # e.g. "Cas" for a French workbook
+sheets:                        # sheet names in your workbook
+  cases: Cases                 # e.g. "Cas hebdo"
+  deaths: Deaths               # e.g. "Décès hebdo"
 columns:                       # headers in your workbook
   district: District           # e.g. Districts
-  region: Region               # e.g. Province
+  region: Region               # e.g. Regions or Province
   year: Year                   # e.g. Année
   week_prefix: W               # e.g. S for S1..S53

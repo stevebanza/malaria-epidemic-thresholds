@@ -15,11 +15,12 @@ from matplotlib.patches import Polygon as MplPolygon  # noqa: E402
 from shapely.geometry import MultiPolygon  # noqa: E402
 from shapely.ops import unary_union  # noqa: E402
 
+from .thresholds import MEASURES, STATUS  # noqa: E402
+
 SURFACE, INK, INK_2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e6e5e1"
 CASES = "#2a78d6"
-STATUS_COLORS = {"Normal": "#cfe3cf", "Alert": "#fab219", "Epidemic": "#d03b3b",
-                 "No data": "#d9d8d4"}
-METHOD_LABEL = {"q3": "Third quartile", "mean_2sd": "Mean + 2 SD", "csum": "C-SUM + 1.96 SD"}
+ALERT_LINE, EPI_LINE = "#b77400", "#d03b3b"
+CODE_COLORS = {"N": "#cfe3cf", "A": "#fab219", "E": "#d03b3b", "NA": "#d9d8d4"}
 
 plt.rcParams.update({
     "font.family": "DejaVu Sans", "font.size": 10, "axes.edgecolor": GRID,
@@ -45,22 +46,72 @@ def _title(ax, title, subtitle=None):
                 va="bottom")
 
 
-def _status_handles(counts=None):
-    return [Patch(facecolor=c, label=f"{s} ({counts.get(s, 0)})" if counts is not None else s)
-            for s, c in STATUS_COLORS.items()]
+def _handles(counts=None):
+    return [Patch(facecolor=c, label=STATUS[k] + (f" ({counts.get(k, 0)})" if counts is not None
+                                                 else "")) for k, c in CODE_COLORS.items()]
 
 
-def status_heatmap(status: pd.DataFrame, order: list[str], path: Path, year: int) -> Path:
+def _thousands(ax):
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+
+
+def unit_panel(ax, status: pd.DataFrame, thr: pd.DataFrame, alert: str, epidemic: str,
+               title: str, last_week: int, year: int, small: bool = True):
+    t = thr.sort_values("week")
+    ax.fill_between(t.week, t["min"], t["max"], color=GRID, label="Baseline range (5 years)")
+    ax.plot(t.week, t[alert], color=ALERT_LINE, lw=1.4, ls=(0, (4, 2)),
+            label=f"Alert: {MEASURES[alert]}")
+    ax.plot(t.week, t[epidemic], color=EPI_LINE, lw=1.6, label=f"Epidemic: {MEASURES[epidemic]}")
+    c = status[(status.week <= last_week) & (status.code != "NA")]
+    ax.plot(c.week, c.value, color=CASES, lw=2, label=f"Cases {year}")
+    for code, col in (("A", ALERT_LINE), ("E", EPI_LINE)):
+        p = c[c.code == code]
+        ax.scatter(p.week, p.value, s=16 if small else 28, color=col, zorder=3,
+                   edgecolor=SURFACE, linewidth=0.8)
+    ax.axvline(last_week, color=INK_2, lw=0.8, ls=":")
+    ax.set_xlim(1, 53)
+    ax.set_ylim(0, None)
+    ax.set_title(title, fontsize=10 if small else 13)
+    _clean(ax)
+    _thousands(ax)
+
+
+def curves(status: pd.DataFrame, thr: pd.DataFrame, units: list[str], alert: str,
+           epidemic: str, path: Path, last_week: int, year: int, heading: str) -> Path:
+    units = units[:9]
+    n = max(len(units), 1)
+    cols = 3 if n > 4 else min(n, 2) if n > 1 else 1
+    rows = int(np.ceil(n / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols + 0.5, 3 * rows + 1.1),
+                             squeeze=False)
+    for ax, u in zip(axes.ravel(), units, strict=False):
+        su = status[status.unit == u]
+        code = su[su.week == last_week].code
+        label = STATUS[code.iloc[0]] if len(code) else "Not reported"
+        unit_panel(ax, su, thr[thr.unit == u], alert, epidemic, f"{u} - {label}", last_week,
+                   year)
+    for ax in axes.ravel()[n:]:
+        ax.axis("off")
+    h, lab = axes[0, 0].get_legend_handles_labels()
+    fig.legend(h, lab, loc="lower center", ncol=4, frameon=False, fontsize=9)
+    fig.suptitle(heading, x=0.01, ha="left", fontsize=14, fontweight="bold", color=INK)
+    fig.tight_layout(rect=(0, 0.06 if rows > 1 else 0.1, 1, 0.95))
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
+def status_heatmap(status: pd.DataFrame, region_of: dict, path: Path, year: int) -> Path:
+    order = sorted(status.unit.unique(), key=lambda d: (region_of.get(d, ""), d))
     weeks = sorted(status.week.unique())
-    codes = {s: i for i, s in enumerate(STATUS_COLORS)}
-    grid = (status.pivot(index="district", columns="week", values="status")
+    codes = {k: i for i, k in enumerate(CODE_COLORS)}
+    grid = (status.pivot(index="unit", columns="week", values="code")
             .reindex(index=order, columns=weeks).map(lambda s: codes.get(s, 3)))
     fig, ax = plt.subplots(figsize=(11, 0.22 * len(order) + 1.8))
     ax.imshow(grid.to_numpy(), aspect="auto", interpolation="nearest",
-              cmap=ListedColormap(list(STATUS_COLORS.values())), vmin=0, vmax=3)
-    ax.set_xticks(np.arange(len(weeks))[::2] if len(weeks) > 26 else np.arange(len(weeks)),
-                  [weeks[i] for i in (range(0, len(weeks), 2) if len(weeks) > 26
-                                      else range(len(weeks)))], fontsize=7.5)
+              cmap=ListedColormap(list(CODE_COLORS.values())), vmin=0, vmax=3)
+    step = 2 if len(weeks) > 26 else 1
+    ax.set_xticks(range(0, len(weeks), step), weeks[::step], fontsize=7.5)
     ax.set_yticks(range(len(order)), order, fontsize=7.5)
     ax.set_xticks(np.arange(-0.5, len(weeks)), minor=True)
     ax.set_yticks(np.arange(-0.5, len(order)), minor=True)
@@ -68,87 +119,38 @@ def status_heatmap(status: pd.DataFrame, order: list[str], path: Path, year: int
     ax.tick_params(which="both", length=0)
     for s in ax.spines.values():
         s.set_visible(False)
-    region = status.drop_duplicates("district").set_index("district").region.reindex(order)
-    starts = [i for i in range(len(order)) if i == 0 or region.iloc[i] != region.iloc[i - 1]]
+    regions = [region_of.get(d, "") for d in order]
+    starts = [i for i in range(len(order)) if i == 0 or regions[i] != regions[i - 1]]
     for k, i in enumerate(starts):
         end = starts[k + 1] if k + 1 < len(starts) else len(order)
         if i:
             ax.axhline(i - 0.5, color=INK, lw=1.4)
-        ax.text(len(weeks) - 0.2, (i + end - 1) / 2, region.iloc[i], va="center", fontsize=8.5,
+        ax.text(len(weeks) - 0.2, (i + end - 1) / 2, regions[i], va="center", fontsize=8.5,
                 color=INK, fontweight="bold")
     ax.set_xlabel("Epidemiological week")
-    _title(ax, f"Weekly status by district, {year}", "Districts grouped by region")
-    ax.legend(handles=_status_handles(), loc="upper center", bbox_to_anchor=(0.5, -0.06),
-              ncol=4, frameon=False, fontsize=8.5)
+    _title(ax, f"Weekly status by district, {year}", "N/A/E per week, districts grouped by region")
+    ax.legend(handles=_handles(), loc="upper center", bbox_to_anchor=(0.5, -0.06), ncol=4,
+              frameon=False, fontsize=8.5)
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
     return path
 
 
-def district_panel(ax, cur: pd.DataFrame, thr: pd.DataFrame, alert: str, epidemic: str,
-                   title: str, last_week: int, small: bool = True):
-    t = thr[thr.week <= max(last_week, 52)]
-    ax.fill_between(t.week, t["min"], t["max"], color=GRID, label="Baseline range")
-    ax.plot(t.week, t[alert], color="#b77400", lw=1.4, ls=(0, (4, 2)),
-            label=f"Alert: {METHOD_LABEL[alert]}")
-    ax.plot(t.week, t[epidemic], color="#d03b3b", lw=1.6,
-            label=f"Epidemic: {METHOD_LABEL[epidemic]}")
-    c = cur[cur.week <= last_week]
-    ax.plot(c.week, c.value, color=CASES, lw=2, label="Cases, current year")
-    ep = c[c.status == "Epidemic"]
-    ax.scatter(ep.week, ep.value, s=18 if small else 30, color="#d03b3b", zorder=3,
-               edgecolor=SURFACE, linewidth=1)
-    ax.set_xlim(1, 53)
-    ax.set_ylim(0, None)
-    ax.set_title(title, fontsize=10 if small else 13)
-    _clean(ax)
-    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-
-
-def district_curves(status: pd.DataFrame, thr: pd.DataFrame, districts: list[str],
-                    alert: str, epidemic: str, path: Path, last_week: int, year: int) -> Path:
-    districts = districts[:9]
-    n = max(len(districts), 1)
-    cols = 3
-    rows = int(np.ceil(n / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(12, 3 * rows + 1), squeeze=False)
-    for ax, d in zip(axes.ravel(), districts, strict=False):
-        cur = status[status.district == d]
-        st = cur[cur.week == last_week].status
-        district_panel(ax, cur, thr[thr.district == d], alert, epidemic,
-                       f"{d} - {st.iloc[0] if len(st) else 'No data'}", last_week)
-    for ax in axes.ravel()[n:]:
-        ax.axis("off")
-    h, lab = axes[0, 0].get_legend_handles_labels()
-    fig.legend(h, lab, loc="lower center", ncol=4, frameon=False, fontsize=9)
-    fig.suptitle(f"Districts in alert or epidemic at week {last_week}, {year}", x=0.01,
-                 ha="left", fontsize=14, fontweight="bold", color=INK)
-    fig.tight_layout(rect=(0, 0.05, 1, 0.97))
-    fig.savefig(path)
-    plt.close(fig)
-    return path
-
-
-def national_curve(cases: pd.DataFrame, year: int, baseline_years: list[int],
-                   last_week: int, path: Path) -> Path:
-    nat = cases.groupby(["year", "week"]).value.sum(min_count=1).reset_index()
-    b = nat[nat.year.isin(baseline_years)].groupby("week").value
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.fill_between(b.min().index, b.min(), b.max(), color=GRID, label="Range, previous years")
-    ax.plot(b.median().index, b.median(), color=INK_2, lw=1.4, ls=(0, (4, 2)),
-            label="Median, previous years")
-    c = nat[(nat.year == year) & (nat.week <= last_week)]
-    ax.plot(c.week, c.value, color=CASES, lw=2.2, label=str(year))
-    ax.set_xlim(1, 53)
-    ax.set_ylim(0, None)
+def share_above_alert(share: pd.DataFrame, critical: float, path: Path, year: int) -> Path:
+    fig, ax = plt.subplots(figsize=(10, 3.6))
+    colors = [EPI_LINE if c else CASES for c in share.critical]
+    ax.bar(share.week, share.pct_above_alert, color=colors, width=0.75, edgecolor=SURFACE)
+    ax.axhline(critical, color=INK_2, lw=1, ls=(0, (4, 3)))
+    ax.text(share.week.min(), critical + 2, f"Critical level {critical:.0f}%", fontsize=8.5,
+            color=INK_2)
+    ax.set_ylim(0, 100)
+    ax.set_xlim(0.3, max(53, share.week.max()) + 0.7)
     ax.set_xlabel("Epidemiological week")
-    ax.set_ylabel("Confirmed malaria cases")
-    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-    _title(ax, "National weekly malaria cases", f"{year} to week {last_week} vs. "
-           f"{min(baseline_years)}-{max(baseline_years)}")
+    ax.set_ylabel("% of districts")
+    _title(ax, "Districts above their alert threshold",
+           f"{year}; red bars = critical level reached")
     _clean(ax)
-    ax.legend(frameon=False, loc="upper left", fontsize=9)
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -160,15 +162,14 @@ def _draw(ax, geom, **kw):
         ax.add_patch(MplPolygon(list(p.exterior.coords), closed=True, **kw))
 
 
-def status_map(summary: pd.DataFrame, geometry: dict, path: Path, last_week: int,
-               year: int) -> Path:
-    st = summary.set_index("district").status
+def status_map(latest: pd.DataFrame, geometry: dict, region_of: dict, path: Path,
+               last_week: int, year: int) -> Path:
+    code = latest.set_index("unit").code
     fig, ax = plt.subplots(figsize=(7.5, 6.6))
     for d, g in geometry.items():
-        _draw(ax, g, facecolor=STATUS_COLORS.get(st.get(d, "No data")), edgecolor="white",
-              linewidth=0.7)
-    for region, g in summary.groupby("region"):
-        shape = unary_union([geometry[x] for x in g.district if x in geometry])
+        _draw(ax, g, facecolor=CODE_COLORS[code.get(d, "NA")], edgecolor="white", linewidth=0.7)
+    for region in sorted(set(region_of.values())):
+        shape = unary_union([geometry[d] for d, r in region_of.items() if r == region])
         _draw(ax, shape, facecolor="none", edgecolor=INK, linewidth=1.3)
         c = shape.representative_point()
         ax.text(c.x, c.y, region, ha="center", va="center", fontsize=8.5, fontweight="bold",
@@ -177,7 +178,7 @@ def status_map(summary: pd.DataFrame, geometry: dict, path: Path, last_week: int
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_title(f"District status, week {last_week} of {year}")
-    ax.legend(handles=_status_handles(st.value_counts()), loc="lower left", frameon=False,
+    ax.legend(handles=_handles(code.value_counts()), loc="lower left", frameon=False,
               fontsize=8.5, title="Status (districts)", title_fontsize=8.5)
     fig.tight_layout()
     fig.savefig(path)

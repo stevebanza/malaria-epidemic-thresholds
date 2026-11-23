@@ -1,10 +1,11 @@
-"""Run the whole weekly analysis from config.yaml."""
+"""Run the analysis for the selected year and week, at national, Admin1 and Admin2 level."""
 from __future__ import annotations
 
 import json
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import yaml
 from shapely.geometry import shape
 
@@ -14,12 +15,21 @@ from .excel import write_workbook
 from .geo import COUNTRY
 from .synthetic import make_dataset
 from .thresholds import (
+    MEASURES,
+    aggregate,
+    auto_week,
     baseline_years,
+    check_pair,
     compute_thresholds,
-    latest_summary,
+    detect_abnormal_years,
     read_weekly,
+    share_above_alert,
+    status_sentence,
+    unusual_values,
     weekly_status,
 )
+
+LEVELS = ("national", "region", "district")
 
 
 def run(config_path: str | Path = "config.yaml", out: str | Path = "output") -> dict:
@@ -27,56 +37,75 @@ def run(config_path: str | Path = "config.yaml", out: str | Path = "output") -> 
     cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
     out = Path(out)
     (out / "charts").mkdir(parents=True, exist_ok=True)
-    year, last_week = cfg["current_year"], cfg["last_week"]
+    year = cfg["selected_year"]
+    alert, epidemic = cfg["alert_threshold"], cfg["epidemic_threshold"]
+    check_pair(alert, epidemic)
 
     if cfg.get("use_sample_data", True):
-        paths = make_dataset(out / "sample_data", cfg["seed"], year - cfg["baseline_years"] - 2,
-                             year, last_week)
+        paths = make_dataset(out / "sample_data", cfg["seed"], year - 7, year,
+                             cfg.get("sample_last_week", 44))
         country = COUNTRY
     else:
         paths = {k: root / v for k, v in cfg["inputs"].items()}
         country = cfg.get("country_name", "Country")
 
-    cols = cfg["columns"]
-    cases = read_weekly(paths["workbook"], cfg["sheets"]["cases"], cols)
-    base = baseline_years(cases, year, cfg["baseline_years"], cfg.get("exclude_years", []),
-                          cfg["auto_exclude"]["enabled"], cfg["auto_exclude"]["factor"])
-    thr = compute_thresholds(cases, base)
-    cur = cases[cases.year == year]
-    status = weekly_status(cur, thr, cfg["alert_method"], cfg["epidemic_method"],
-                           cfg["consecutive_weeks"], last_week)
-    summary = latest_summary(status, last_week)
+    indicator = cfg.get("indicator", "cases")
+    data = read_weekly(paths["workbook"], cfg["sheets"][indicator], cfg["columns"])
+    week = auto_week(data, year) if str(cfg["week"]).lower() == "auto" else int(cfg["week"])
+    abnormal = [int(y) for y in cfg.get("abnormal_years") or []]
+    years = baseline_years(year, sorted(data.year.unique()), abnormal, cfg["baseline_years"])
+    if len(years) < cfg["baseline_years"]:
+        print(f"Warning: only {len(years)} baseline years available: {years}")
+
+    agg = {lv: aggregate(data, lv) for lv in LEVELS}
+    thr = {lv: compute_thresholds(agg[lv], years) for lv in LEVELS}
+    status = {lv: weekly_status(agg[lv], thr[lv], year, alert, epidemic, week) for lv in LEVELS}
+    region_of = data.drop_duplicates("district").set_index("district").region.to_dict()
+
+    sd = status["district"]
+    latest = sd[sd.week == week].copy()
+    latest["region"] = latest.unit.map(region_of)
+    latest["ratio"] = (latest.value / latest.epidemic_threshold).round(2)
+    latest["weeks_a_or_e"] = latest.unit.map(sd[sd.code.isin(["A", "E"])].groupby("unit").size()
+                                             ).fillna(0).astype(int)
+    rank = {"E": 0, "A": 1, "NA": 2, "N": 3}
+    latest = latest.sort_values(["code", "ratio"], key=lambda s: s.map(rank) if s.name == "code"
+                                else -s.fillna(0)).reset_index(drop=True)
+    share = share_above_alert(sd, cfg["critical_pct"])
+    nat = status["national"]
+    nat_code = nat[nat.week == week].code.iloc[0]
 
     gj = json.loads(Path(paths["geometry"]).read_text(encoding="utf-8"))
     geometry = {f["properties"]["district"]: shape(f["geometry"]) for f in gj["features"]}
-    order = summary.sort_values(["region", "district"]).district.tolist()
-    used_years = sorted(base[base.used].year.unique())
     c = out / "charts"
-    flagged = summary[summary.status.isin(["Epidemic", "Alert"])].district.tolist()
+    flagged = latest[latest.code.isin(["E", "A"])].unit.tolist()
     ch = {
-        "heatmap": charts.status_heatmap(status, order, c / "status_heatmap.png", year),
-        "curves": charts.district_curves(status, thr, flagged, cfg["alert_method"],
-                                         cfg["epidemic_method"], c / "district_curves.png",
-                                         last_week, year),
-        "national": charts.national_curve(cases, year, used_years, last_week,
-                                          c / "national_curve.png"),
-        "map": charts.status_map(summary, geometry, c / "status_map.png", last_week, year),
+        "map": charts.status_map(latest, geometry, region_of, c / "status_map.png", week, year),
+        "heatmap": charts.status_heatmap(sd, region_of, c / "status_heatmap.png", year),
+        "national_regions": charts.curves(
+            pd.concat([status["national"], status["region"]]),
+            pd.concat([thr["national"], thr["region"]]),
+            ["National"] + sorted(status["region"].unit.unique()), alert, epidemic,
+            c / "curves_national_regions.png", week, year,
+            f"National and regional curves, week {week} of {year}"),
+        "districts": charts.curves(sd, thr["district"], flagged, alert, epidemic,
+                                   c / "curves_districts.png", week, year,
+                                   f"Districts in epidemic or alert at week {week}, {year}"),
+        "share": charts.share_above_alert(share, cfg["critical_pct"], c / "share_above_alert.png",
+                                          year),
     }
-    xlsx = write_workbook(out / f"malaria_thresholds_{year}_W{last_week}.xlsx", summary,
-                          status, thr, base, year)
-    last4 = status[status.week > last_week - 4].value.sum()
-    kpis = {"epidemic": int((summary.status == "Epidemic").sum()),
-            "alert": int((summary.status == "Alert").sum()), "cases_4w": float(last4),
-            "completeness": float(status.value.notna().mean() * 100)}
-    ctx = {"country": country, "year": year, "last_week": last_week, "summary": summary,
-           "status": status, "thresholds": thr, "alert_method": cfg["alert_method"],
-           "epidemic_method": cfg["epidemic_method"], "consecutive": cfg["consecutive_weeks"],
-           "geometry": geometry, "charts": ch, "kpis": kpis, "generated": date.today().isoformat(),
-           "baseline_label": f"{min(used_years)}-{max(used_years)}"}
-    dash = build_dashboard(out / f"malaria_dashboard_{year}_W{last_week}.html", ctx)
-    headline = (f"Week {last_week} of {year}: {kpis['epidemic']} district(s) in epidemic, "
-                f"{kpis['alert']} on alert, {len(summary) - kpis['epidemic'] - kpis['alert']} "
-                f"normal or not reported.")
-    return {"summary": summary, "status": status, "thresholds": thr, "baseline": base,
-            "workbook": xlsx, "dashboard": dash, "charts": ch, "headline": headline,
-            "inputs": paths}
+    res = {
+        "country": country, "indicator": indicator, "year": year, "last_week": week,
+        "alert": alert, "epidemic": epidemic, "baseline_years": years, "abnormal_years": abnormal,
+        "critical_pct": cfg["critical_pct"], "agg": agg, "thresholds": thr, "status": status,
+        "latest": latest, "share": share, "unusual": unusual_values(data, year),
+        "abnormal_check": detect_abnormal_years(data, year, cfg["baseline_years"], 1.5),
+        "geometry": geometry, "region_of": region_of, "charts": ch, "inputs": paths,
+        "generated": date.today().isoformat(),
+        "headline": status_sentence(nat_code, f"national level ({country})", week, year, alert,
+                                    epidemic),
+    }
+    res["workbook"] = write_workbook(out / f"malaria_thresholds_{year}_W{week}.xlsx", res)
+    res["dashboard"] = build_dashboard(out / f"malaria_dashboard_{year}_W{week}.html", res)
+    res["measures"] = MEASURES
+    return res

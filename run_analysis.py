@@ -17,9 +17,12 @@ def main() -> int:
     r = run(a.config, a.out)
     try:
         print(r["headline"])
-        for d in r["summary"][r["summary"].status == "Epidemic"].itertuples():
-            print(f"  EPIDEMIC  {d.district:<10} {d.region:<10} "
-                  f"above alert since week {d.episode_start_week}")
+        lt = r["latest"]
+        print(f"Baseline years: {r['baseline_years']} (abnormal years skipped: "
+              f"{r['abnormal_years'] or 'none'})")
+        for x in lt[lt.code.isin(["E", "A"])].itertuples():
+            print(f"  {x.code}  {x.unit:<10} {x.region:<10} {x.value:>8,.0f} cases, "
+                  f"{x.ratio:.2f} x epidemic threshold")
         print(f"Workbook:  {r['workbook']}")
         print(f"Dashboard: {r['dashboard']}")
     except BrokenPipeError:
