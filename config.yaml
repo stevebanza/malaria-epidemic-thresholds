@@ -1,0 +1,29 @@
+# Weekly run: update last_week (and current_year in January).
+current_year: 2026
+last_week: 44
+
+# Thresholds
+baseline_years: 5              # previous years used to build the thresholds
+alert_method: q3               # q3 | mean_2sd | csum
+epidemic_method: mean_2sd      # q3 | mean_2sd | csum
+consecutive_weeks: 2           # weeks above the epidemic threshold before "Epidemic"
+exclude_years: []              # years to drop from the baseline for every district
+auto_exclude:                  # drop a district's past epidemic years automatically
+  enabled: true
+  factor: 1.5                  # annual cases > factor x median of the other baseline years
+
+# Sample data (fictional country). Set to false and fill `inputs` for your own workbook.
+use_sample_data: true
+seed: 7
+
+country_name: "My country"
+inputs:
+  workbook: data/malaria_weekly.xlsx
+  geometry: data/districts.geojson
+sheets:
+  cases: Cases                 # e.g. "Cas" for a French workbook
+columns:                       # headers in your workbook
+  district: District           # e.g. Districts
+  region: Region               # e.g. Province
+  year: Year                   # e.g. Année
+  week_prefix: W               # e.g. S for S1..S53
