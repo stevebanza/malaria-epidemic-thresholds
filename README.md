@@ -2,200 +2,245 @@
 
 [![tests](https://github.com/stevebanza/malaria-epidemic-thresholds/actions/workflows/ci.yml/badge.svg)](https://github.com/stevebanza/malaria-epidemic-thresholds/actions/workflows/ci.yml)
 
-**Every Monday, a malaria surveillance officer has to answer one question: *is the number of cases in each district normal for this time of year, or is an epidemic starting?***
+**Is the number of malaria cases this week normal *for this week of the year*?**
 
-This tool answers it from the weekly district data the team already collects. For each district and week it compares this year's cases with the same weeks of the previous five years. It then marks each district **Normal**, **Alert** or **Epidemic** and produces the files the team needs to act on: a colour-coded Excel workbook and an offline dashboard.
+This is the question behind epidemic detection. The answer comes from history: this week's cases are compared with **the same epidemiological week in the five previous years**. If they are higher than that history allows, the district is on **Alert**; if they are higher still, it is in **Epidemic**.
 
-> **The data is synthetic.** The districts of the "Republic of Kivara" and all figures are invented for this demonstration. The methods are those of WHO guidance on malaria epidemic detection and are used in real national surveillance work.
+This repository is a Python version of a weekly malaria epidemic-threshold tool I developed in Excel and use with national malaria programmes. It reproduces the same method, measure by measure, and adds what is hard to do in a workbook:
+- every district analysed in one run;
+- an offline HTML dashboard;
+- an automated test for each rule.
+
+> **The data is synthetic.** The districts of the "Republic of Kivara" and all figures are invented. There is no country data in this repository.
 
 ![Dashboard](docs/dashboard.png)
 
 ---
 
-## This week's result (sample data, week 44 of 2026)
+## How a threshold is built
 
-```
-Week 44 of 2026: 5 district(s) in epidemic, 7 on alert, 24 normal or not reported.
-  EPIDEMIC  Fudibe     Northland  above alert since week 40
-  EPIDEMIC  Kama       Lakeside   above alert since week 33
-  EPIDEMIC  Kita       Coastal    above alert since week 31
-  EPIDEMIC  Mbewa      Savanna    above alert since week 35
-  EPIDEMIC  Nenemu     Riverbend  above alert since week 32
-```
+Take week 44 of 2026 in one district:
 
-| District | Cases, week 44 | Epidemic threshold | Last 4 weeks vs threshold |
-| --- | ---: | ---: | ---: |
-| Nenemu | 2,405 | 1,160 | 14,443 vs 6,707 (2.2×) |
-| Mbewa | 774 | 293 | 3,990 vs 1,682 (2.4×) |
-| Kita | 387 | 150 | 1,648 vs 846 (1.9×) |
-| Kama | 583 | 528 | 2,680 vs 2,238 (1.2×) |
-| Fudibe | 499 | 357 | 2,059 vs 1,716 (1.2×) |
+1. **Choose the selected year and week.** The week is either set by hand or `auto`: the last week reported nationally.
+2. **Take the same week, 44, in the five previous years.** This is the baseline.
+3. **Skip abnormal years.** If a year is listed as abnormal (a past epidemic, a reporting break), it is **replaced by the year before it**, so the baseline always has five years. With 2022 declared abnormal, the baseline for 2026 is 2020, 2021, 2023, 2024 and 2025.
+4. **Compute the two thresholds** from those five values: an alert threshold and a higher epidemic threshold, using the measures chosen below. Zero values count as *not reported* and are left out.
+5. **Compare week 44 of 2026 with them:**
 
-Nenemu, Mbewa and Kita are running at roughly twice their epidemic threshold: these are clear epidemics. Kama and Fudibe are just above it, so the first step there is to check the data before mobilising a response.
+| Code | Status | Rule |
+| :---: | --- | --- |
+| **E** | Epidemic | cases > epidemic threshold |
+| **A** | Alert | cases > alert threshold |
+| **N** | Normal | otherwise; continue routine surveillance |
+| **NA** | Not reported | no value, or 0 |
 
----
+Each week stands on its own: one week above the epidemic threshold is an **E**. Previous weeks of the current year play no part in the threshold.
 
-## Reading a district curve
+This is done at three levels, each on **its own summed cases**:
+- **national** (all districts added together);
+- **Admin1** (regions or provinces);
+- **Admin2** (districts).
 
-![District curves](docs/district_curves.png)
-
-Each panel shows one district:
-- **grey band:** the lowest-to-highest weekly cases in the baseline years;
-- **dashed amber line:** the alert threshold (third quartile);
-- **red line:** the epidemic threshold (mean + 2 SD);
-- **blue line:** this year's cases. Red dots mark *Epidemic* weeks.
-
-**Worked example: Kita, Coastal region.** The usual seasonal peak (around week 30, about 860 cases) passed normally. Then cases rose again when they should have been falling:
-
-| Week | Cases | Alert threshold | Epidemic threshold | Status |
-| ---: | ---: | ---: | ---: | --- |
-| 38 | 671 | 407 | 454 | Epidemic |
-| 40 | 533 | 269 | 302 | Epidemic |
-| 42 | 420 | 186 | 234 | Epidemic |
-| 44 | 387 | 139 | 150 | Epidemic |
-
-Kita's cases are falling week on week, which might look reassuring. But the thresholds are falling faster, because this is normally the end of the season. Kita is at 2.6× its expected level, so comparing with last week is not enough. **Compare with the same week in normal years.**
+A region's threshold is therefore computed from the region's totals, not by adding up district thresholds.
 
 ---
 
-## Why past epidemic years must be excluded
+## The measures
 
-A threshold built from years that include an epidemic is too high, and it hides the next epidemic.
+| Code | Measure | Computed on the 5 baseline values of week *w* | Can be used as |
+| :---: | --- | --- | --- |
+| a | 1st quartile | 25th percentile | Alert |
+| d | C-SUM | mean of weeks *w−1*, *w*, *w+1* (15 values) | Alert |
+| c | Median | 50th percentile | Alert or epidemic |
+| b | 3rd quartile | 75th percentile | Alert or epidemic |
+| e | 85th centile | 85th percentile | Epidemic |
+| f | Mean + 2 SD | mean + 2 standard deviations | Epidemic |
 
-In the sample, Kilave district had an epidemic in 2022. The tool detects it automatically: 138,778 cases that year, against a median of 65,300 in its other baseline years. The effect on the threshold at week 38:
+The epidemic threshold must be higher than the alert threshold, so only these pairs are accepted:
 
-| Baseline | Alert threshold | Epidemic threshold |
-| --- | ---: | ---: |
-| 2021-2025 with 2022 excluded (default) | 3,782 | **4,174** |
-| 2021-2025 with 2022 kept | 4,074 | **11,629** |
-
-With 2022 left in, Kilave would need almost three times as many cases before an epidemic was flagged. Every excluded district-year is listed with its reason in the *Baseline years* sheet, so the choice can be reviewed and overridden in `config.yaml`.
-
----
-
-## Choosing the thresholds
-
-| Method | How it's computed | Behaviour | Typical use |
-| --- | --- | --- | --- |
-| Third quartile (`q3`) | 75th percentile of week *w* in the baseline | Sensitive; robust to one unusual year | **Alert** (default) |
-| Mean + 2 SD (`mean_2sd`) | Mean of week *w* + 2 standard deviations | More specific; pushed up by any extreme year, hence the exclusion step | **Epidemic** (default) |
-| C-SUM (`csum`) | Mean of weeks *w−1*, *w*, *w+1* + 1.96 SD | Smoother; less noisy when weekly counts are small | Low-transmission or small districts |
-
-A district is declared **Epidemic** only after **2 consecutive weeks** above the epidemic threshold (`consecutive_weeks`), so a single late or batched report doesn't trigger it. A first week above is shown as **Alert**. Unreported weeks are shown as **No data** and are never treated as zero.
-
-All three thresholds are saved in the workbook, so a team can compare methods on its own history before choosing.
-
----
-
-## What each status calls for
-
-This is a starting point; national guidelines take precedence.
-
-| Status | First actions |
+| Alert threshold | Allowed epidemic thresholds |
 | --- | --- |
-| **Alert** | Check the data: late or batched reports, a new health facility, a change in testing (more RDTs). Confirm the share of positive tests. Check stocks of RDTs and ACTs. Watch the following week. |
-| **Epidemic** | Notify the district and national teams. Investigate (cases by age and village, deaths, test positivity). Pre-position commodities. Plan the response: case management, vector control, communication. |
-| **No data** | Follow up the missing reports. A silent district during the season is a risk in itself. |
+| 1st quartile (a) or C-SUM (d) | median, 3rd quartile, 85th centile, mean + 2 SD |
+| Median (c) | 3rd quartile, 85th centile, mean + 2 SD |
+| 3rd quartile (b) | 85th centile, mean + 2 SD |
+
+The default is **median → 3rd quartile**.
+
+**Strengths and limits of each measure:**
+
+| Measure | Strengths | Limits |
+| --- | --- | --- |
+| Quartiles, median, 85th centile | Moderately sensitive. Not pulled up by an abnormal year, unlike mean + 2 SD. Simple to compute without weighting by health facility. | Can miss large epidemics, especially in low and very low transmission areas. |
+| C-SUM | Very sensitive; detects even minor epidemics. Best suited to very low transmission settings where elimination has started and any resurgence counts as an epidemic. | Can produce false alarms in moderate transmission areas with frequent epidemics. Less suited to highly seasonal settings. |
+| Mean + 2 SD | Less sensitive to minor peaks; avoids over-reaction in stable transmission areas with small seasonal fluctuations. | Can miss large epidemics in low transmission areas. Pulled up by any year with very high case numbers, so abnormal years must be excluded. |
+
+**The same week under different choices** (sample data, week 44, 36 districts):
+
+| Alert → Epidemic | Epidemic | Alert | Normal |
+| --- | ---: | ---: | ---: |
+| 1st quartile → median | 12 | 9 | 15 |
+| C-SUM → median | 12 | 0 | 24 |
+| **Median → 3rd quartile** (default) | **10** | **2** | **24** |
+| Median → 85th centile | 7 | 5 | 24 |
+| Median → mean + 2 SD | 4 | 8 | 24 |
+| 3rd quartile → mean + 2 SD | 4 | 6 | 26 |
+
+The choice of measures is a programme decision. It depends on the level of transmission and on how much the team can afford to investigate each week. The tool lets a team test the choice on its own history before adopting it.
 
 ---
 
-## The weekly routine
+## Worked example: Yondi district, week 44 of 2026
 
-1. Receive the updated workbook (all districts, current year up to the last complete week).
-2. Set `last_week` in `config.yaml`.
-3. Run `python run_analysis.py`. It takes a few seconds.
-4. Open the dashboard. Start with the list of districts in alert or epidemic, then click each one on the map to see its curve.
-5. Share the Excel workbook with the team and the district focal points.
+The five baseline values for week 44 give:
 
-![Weekly status heatmap](docs/status_heatmap.png)
+| 1st quartile | Median | C-SUM | 3rd quartile | 85th centile | Mean + 2 SD |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 176 | 182 | 186 | 198 | 208 | 245 |
 
-The heatmap shows the whole year at a glance:
-- an epidemic shows as a run of red;
-- persistent amber early in the year (Nega, Sawane) suggests this year's level is generally higher, or that the baseline years were low. That's worth a data check rather than a response.
+Yondi reported **489 cases**: 2.5 times the 3rd quartile, so the status is **E**. It is no isolated week. Every week since week 38 has been more than twice its own threshold:
+
+| Week | Cases | Alert (median) | Epidemic (3rd quartile) | Status |
+| ---: | ---: | ---: | ---: | :---: |
+| 38 | 421 | 222 | 248 | E |
+| 40 | 500 | 215 | 223 | E |
+| 42 | 458 | 184 | 185 | E |
+| 44 | 489 | 182 | 198 | E |
+
+The cases are flat (about 450 a week), but the thresholds fall as the season ends. A district that "isn't getting worse" can still be far above what is normal for the time of year.
+
+![Districts in epidemic or alert](docs/curves_districts.png)
 
 ---
 
-## Input: the workbook you already have
+## Why abnormal years are skipped and replaced
 
-One sheet of cases, with one row per district and year and one column per epidemiological week:
+The sample has a national epidemic in 2022: 3.16 million cases, almost twice the usual 1.64 million. The workbook's *Abnormal year check* sheet flags such years as candidates. Whether to list a year as abnormal remains the programme's decision.
+
+| Baseline for 2026 | National week 33 thresholds (median / 3rd quartile) | Districts in epidemic at week 44 |
+| --- | --- | ---: |
+| 2020, 2021, 2023, 2024, 2025 (2022 replaced by 2020) | 77,632 / 79,142 | **10** |
+| 2021–2025 (2022 kept) | 79,142 / 82,099 | 7 |
+
+Keeping 2022 raises the thresholds and **hides three epidemics**.
+
+---
+
+## National picture: how many districts are above their alert threshold?
+
+Besides each district's status, the tool tracks the **share of reporting districts above their alert threshold** every week. It compares that share with a critical level, 30% by default. In the sample, the critical level is reached in 11 weeks of 2026, including every week from 39 to 44.
+
+![Share of districts above alert](docs/share_above_alert.png)
+
+![National and regional curves](docs/curves_national_regions.png)
+
+---
+
+## Data checks
+
+Before any status is trusted, the data is checked district by district. Within each district-year:
+- weeks **above the mean + 2 SD of that year** are flagged as unusually high;
+- weeks **below the mean − 2 SD** are flagged as possibly missing or under-reported.
+
+In the threshold sheets, baseline values outside the mean ± 2 SD for their week are shown in red italics, as in the original tool.
+
+---
+
+## Input
+
+The workbook layout national teams already use: one sheet of cases and one of deaths, each with one row per district and year and one column per epidemiological week.
 
 | District | Region | Year | W1 | W2 | … | W53 |
 | --- | --- | ---: | ---: | ---: | --- | ---: |
-| Kita | Coastal | 2025 | 118 | 131 | … | 142 |
-| Kita | Coastal | 2026 | 103 | 120 | … | |
+| Yondi | Northland | 2025 | 196 | 188 | … | |
+| Yondi | Northland | 2026 | 171 | 180 | … | |
 
-A French workbook is used as it is: only the column names are mapped in `config.yaml`.
+A French workbook is used as it is, by mapping its headers in `config.yaml`:
 
 ```yaml
 sheets:
-  cases: Cas
+  cases: Cas hebdo
+  deaths: Décès hebdo
 columns:
   district: Districts
-  region: Province
+  region: Regions
   year: Année
   week_prefix: S        # S1..S53
 ```
 
-District boundaries (GeoJSON, one feature per district with a `district` property) are used for the map.
+The analysis can run on **cases or deaths** (`indicator`). District boundaries (GeoJSON) are used for the map.
 
 ## Outputs
 
-- **`malaria_dashboard_<year>_W<week>.html`**: one file that works offline and can be sent by email. It contains:
-  - a status map (click a district to see its curve, hover for exact figures);
-  - the list of districts in alert or epidemic;
-  - the weekly heatmap;
-  - the national curve.
-- **`malaria_thresholds_<year>_W<week>.xlsx`**, with these sheets:
-  - *Summary*;
-  - *Status* (N / A / E, colour-coded);
-  - *Cases* (coloured by status);
-  - one sheet of thresholds per method (district × week);
-  - *Baseline years* (with exclusion reasons).
-- **`charts/`**: status map, heatmap, district curves and national curve as PNG files, ready for a bulletin.
+**The workbook, `malaria_thresholds_<year>_W<week>.xlsx`, laid out like the original tool:**
+
+| Sheet | Contents |
+| --- | --- |
+| Settings | year, week, measures, baseline years, abnormal years |
+| Week *n* status | every district: status, cases, both thresholds, cases ÷ epidemic threshold |
+| Summary N-A-E | districts × weeks, colour-coded |
+| National / Admin1 / Admin2 | for each unit: the 5 baseline years, the selected year, the alert and epidemic thresholds for weeks 1–53 |
+| % districts above alert | weekly share against the critical level |
+| Data checks | unusually high or low weeks |
+| Abnormal year check | national totals per year, with candidates for the abnormal list |
+
+**The dashboard, `malaria_dashboard_<year>_W<week>.html`,** is one file that works offline. It contains:
+- the national status banner;
+- the district map (click a district to see its curve);
+- a curve for any unit at national, Admin1 or Admin2 level;
+- the list of districts in epidemic or alert;
+- the weekly N/A/E summary;
+- the share of districts above alert.
+
+**Charts** (PNG, for bulletins): status map, weekly summary heatmap, national and regional curves, district curves, share above alert.
+
+![Weekly summary](docs/status_heatmap.png)
 
 ---
 
-## Limitations
-
-- **It needs history:** at least 3 years, ideally 5, of complete weekly data per district. Districts that were recently split or created need their history rebuilt first.
-- **It works on cases, not incidence:** a growing population raises cases slowly. For long baselines in fast-growing areas, consider rates per 1,000.
-- **Changes in testing or reporting** (scale-up of RDTs, community case management, new facilities) raise cases without any epidemic. That's why Alert is a prompt to check, not a conclusion.
-- **Small numbers:** a district with very few weekly cases gives unstable thresholds. C-SUM or aggregating to a higher level works better there.
-- **Week 53:** when a baseline year has no week 53, its week 52 is used.
-
----
-
-## Quick start
+## Running it
 
 ```bash
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python run_analysis.py
-pytest -q                                              # 9 tests
+pytest -q
 ```
 
-The tests check four things:
-- the thresholds against a hand calculation;
-- the 2-consecutive-weeks rule;
-- that the planted 2022 epidemic is excluded in exactly the right five districts;
-- that a French-format workbook gives identical results.
+```
+Week 44 of 2026 - Epidemic: above the epidemic threshold (3rd quartile (b)) - national level
+Baseline years: [2020, 2021, 2023, 2024, 2025] (abnormal years skipped: [2022])
+  E  Yondi      Northland       489 cases, 2.47 x epidemic threshold
+  E  Nenemu     Riverbend     2,760 cases, 2.22 x epidemic threshold
+  ...
+```
+
+Every week, update the workbook and run again. The week is detected automatically. To review a past year, change `selected_year`.
+
+The 11 tests check each rule of the original tool:
+- abnormal years are replaced by earlier years;
+- each measure matches the Excel formula, including C-SUM as a plain 3-week mean and the sample standard deviation;
+- zeros are ignored;
+- the status is decided one week at a time;
+- only valid threshold pairs are accepted;
+- each level uses its own summed cases;
+- a French-format workbook gives identical thresholds.
 
 ```
-config.yaml          current week, methods, baseline length, exclusions, column mapping
+config.yaml          selected year and week, measures, abnormal years, critical %, column mapping
 malthresh/
-  thresholds.py      reading the workbook, baseline years, thresholds, weekly status
-  charts.py          map, heatmap, curves
-  excel.py           colour-coded workbook
+  thresholds.py      baseline years, the six measures, weekly status, data checks
+  excel.py           workbook laid out like the original tool
+  charts.py          map, heatmap, curves, share above alert
   dashboard.py       offline HTML dashboard
-  synthetic.py       sample data and French-layout writer
-  pipeline.py        runs everything
+  synthetic.py       sample data
+  pipeline.py        runs everything at the three levels
 ```
 
 ---
 
 ## Résumé en français
 
-Cet outil calcule, pour chaque district et chaque semaine épidémiologique, des **seuils d'alerte** (troisième quartile) et des **seuils épidémiques** (moyenne + 2 écarts-types, ou C-SUM) à partir des cinq années précédentes. Il classe ensuite chaque district en *Normal*, *Alerte* ou *Épidémie*. Les années épidémiques passées sont exclues automatiquement de la période de référence. Il lit directement un classeur au format habituel (Districts, Province, Année, S1…S53) et produit un classeur Excel coloré et un tableau de bord HTML utilisable hors ligne. Les données de ce dépôt sont fictives.
+Pour chaque semaine de l'année choisie, l'outil compare le nombre de cas à **la même semaine des cinq années précédentes**. Les années anormales sont exclues et remplacées par l'année antérieure. Il calcule un **seuil d'alerte** et un **seuil épidémique**, au choix parmi : 1er quartile, C-SUM, médiane, 3e quartile, 85e centile, moyenne + 2 écarts-types. Le statut de chaque semaine est N (normal), A (alerte), E (épidémie) ou NA (non rapporté), au niveau national, régional et du district. Il lit directement le classeur habituel (Districts, Régions, Année, S1…S53) et produit un classeur Excel et un tableau de bord HTML hors ligne. Les données de ce dépôt sont fictives.
 
 ---
 
